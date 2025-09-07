@@ -117,10 +117,51 @@ io.on("connection", (socket) => {
   socket.on("selectTeam", ({ room, team }) => {
     const r = rooms[room];
     if (!r || r.phase !== "teamSelection") return;
-    r.team = Array.isArray(team) ? team : [];
-    r.votes = [];
-    r.phase = "teamVote";
-    emitRoomState(room);
+
+    // Solo líder puede confirmar
+    const leaderId = Object.keys(r.players)[r.leaderIndex];
+    if (socket.id !== leaderId) return;
+
+    // Validar cantidad según reglas oficiales
+    const sizes = {
+      5: [2, 3, 2, 3, 3],
+      6: [2, 3, 4, 3, 4],
+      7: [2, 3, 3, 4, 4],
+      8: [3, 4, 4, 5, 5],
+      9: [3, 4, 4, 5, 5],
+      10: [3, 4, 4, 5, 5],
+    };
+    const total = Object.keys(r.players).length;
+    const required = sizes[total]?.[r.round - 1] ?? 2;
+
+    const cleanTeam = Array.isArray(team)
+      ? team.filter((id) => r.players[id])
+      : [];
+    if (cleanTeam.length !== required) {
+      io.to(socket.id).emit("toast", {
+        type: "error",
+        msg: `Debes elegir exactamente ${required} jugadores.`,
+      });
+      return;
+    }
+
+    r.team = cleanTeam;
+    r.votes = []; // si todavía guardas votos de equipo, límpialos
+    r.missionVotes = []; // votos de misión empiezan vacíos
+    r.phase = "missionVote";
+
+    io.to(room).emit("state", {
+      phase: r.phase,
+      leaderId,
+      round: r.round,
+      results: r.results,
+      goodWins: r.goodWins,
+      assassinWins: r.assassinWins,
+      team: r.team,
+      teamVotes: r.votes,
+      missionVotes: r.missionVotes,
+      players: Object.values(r.players),
+    });
   });
 
   // Votación del equipo (regla: si hay exactamente 1 rechazo, ganan Asesinos la ronda)
@@ -182,44 +223,101 @@ io.on("connection", (socket) => {
   // Votación de misión (si hay al menos un Fracaso => gana Asesinos la ronda; si no, gana Buenos)
   socket.on("voteMission", ({ room, vote }) => {
     const r = rooms[room];
-    if (!r || !r.team.includes(socket.id)) return;
+    if (!r || r.phase !== "missionVote") return;
+    if (!r.team.includes(socket.id)) return; // solo votan los del equipo
 
-    // Evitar votos duplicados
+    // Evitar voto duplicado
     if (r.missionVotes.find((v) => v.playerId === socket.id)) return;
 
     r.missionVotes.push({ playerId: socket.id, vote });
 
-    // Avisar a todos del progreso de votos
-    io.to(room).emit("state", r);
+    // Broadcast del progreso
+    const leaderId = Object.keys(r.players)[r.leaderIndex];
+    io.to(room).emit("state", {
+      phase: r.phase,
+      leaderId,
+      round: r.round,
+      results: r.results,
+      goodWins: r.goodWins,
+      assassinWins: r.assassinWins,
+      team: r.team,
+      teamVotes: r.votes,
+      missionVotes: r.missionVotes,
+      players: Object.values(r.players),
+    });
 
-    // Cuando todos votaron, calcular resultado automático
+    // Cuando todos los del equipo votaron -> resolver automáticamente
     if (r.missionVotes.length === r.team.length) {
       const fail = r.missionVotes.some((v) => v.vote === "Fracaso");
       const winner = fail ? "Asesinos" : "Buenos";
 
-      // Guardar resultado
       r.results.push({ round: r.round, winner });
-
       if (winner === "Buenos") r.goodWins++;
       else r.assassinWins++;
 
-      // Verificar si alguien ganó
-      if (r.goodWins >= 3 || r.assassinWins >= 3) {
+      // ¿Fin de partida?
+      const finished = r.goodWins >= 3 || r.assassinWins >= 3 || r.round >= 5;
+      if (finished) {
         r.phase = "gameOver";
-        io.to(room).emit("state", r);
+        io.to(room).emit("state", {
+          phase: r.phase,
+          leaderId,
+          round: r.round,
+          results: r.results,
+          goodWins: r.goodWins,
+          assassinWins: r.assassinWins,
+          team: r.team,
+          teamVotes: r.votes,
+          missionVotes: r.missionVotes,
+          players: Object.values(r.players),
+        });
         return;
       }
 
-      // Reiniciar para siguiente ronda
+      // Siguiente ronda
       r.round++;
       r.phase = "teamSelection";
       r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
       r.team = [];
-      r.teamVotes = [];
+      r.votes = [];
       r.missionVotes = [];
 
-      io.to(room).emit("state", r);
+      io.to(room).emit("state", {
+        phase: r.phase,
+        leaderId: Object.keys(r.players)[r.leaderIndex],
+        round: r.round,
+        results: r.results,
+        goodWins: r.goodWins,
+        assassinWins: r.assassinWins,
+        team: r.team,
+        teamVotes: r.votes,
+        missionVotes: r.missionVotes,
+        players: Object.values(r.players),
+      });
     }
+  });
+
+  socket.on("draftTeam", ({ room, team }) => {
+    const r = rooms[room];
+    if (!r || r.phase !== "teamSelection") return;
+    // Solo líder
+    const leaderId = Object.keys(r.players)[r.leaderIndex];
+    if (socket.id !== leaderId) return;
+
+    r.team = Array.isArray(team) ? team.filter((id) => r.players[id]) : [];
+    // No se cambia la fase; solo se refleja el borrador a todos
+    io.to(room).emit("state", {
+      phase: r.phase,
+      leaderId,
+      round: r.round,
+      results: r.results,
+      goodWins: r.goodWins,
+      assassinWins: r.assassinWins,
+      team: r.team,
+      teamVotes: r.votes,
+      missionVotes: r.missionVotes,
+      players: Object.values(r.players),
+    });
   });
 
   // Salida
