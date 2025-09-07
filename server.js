@@ -75,7 +75,7 @@ io.on("connection", (socket) => {
     if (!r) return;
 
     const ids = Object.keys(r.players);
-    if (ids.length < 5) {
+    if (ids.length < 2) {
       io.to(room).emit("toast", {
         type: "error",
         msg: "Se requieren al menos 5 jugadores.",
