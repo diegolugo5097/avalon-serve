@@ -135,6 +135,23 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("missionResult", ({ success }) => {
+    setLastMissionResult(success ? "success" : "fail");
+    setShowMissionResult(true);
+
+    // Reproducir sonido según resultado
+    const sound = new Audio(
+      success ? "/sounds/success.mp3" : "/sounds/fail.mp3"
+    );
+    sound.play().catch(() => {});
+
+    // Ocultar modal después de 2.5 segundos
+    setTimeout(() => {
+      setShowMissionResult(false);
+      setLastMissionResult(null);
+    }, 2500);
+  });
+
   // Desconexión de jugador
   socket.on("disconnect", () => {
     for (const room in rooms) {
