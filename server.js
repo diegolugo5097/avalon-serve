@@ -10,7 +10,7 @@ const io = new Server({
 
 const rooms = {};
 
-// Tabla de tamaños de equipo por ronda y cantidad de jugadores
+// Tamaño de equipo por ronda y número de jugadores
 const missionTeamSizes = {
   5: [2, 3, 2, 3, 3],
   6: [2, 3, 4, 3, 4],
@@ -35,7 +35,7 @@ io.on("connection", (socket) => {
         goodWins: 0,
         assassinWins: 0,
         team: [],
-        votes: [],
+        teamVotes: [],
         missionVotes: [],
         roles: {},
         gameOver: false,
@@ -64,12 +64,13 @@ io.on("connection", (socket) => {
     r.roles = {};
     playerIds.forEach((id) => {
       r.roles[id] = assassins.includes(id) ? "Asesino" : "Bueno";
+      io.to(id).emit("yourRole", r.roles[id]); // Enviamos el rol a cada jugador
     });
 
     r.phase = "teamSelection";
     r.round = 1;
     r.team = [];
-    r.votes = [];
+    r.teamVotes = [];
     r.missionVotes = [];
     r.results = [];
     r.goodWins = 0;
@@ -78,7 +79,7 @@ io.on("connection", (socket) => {
     io.to(room).emit("state", buildState(room));
   });
 
-  // Borrador de equipo (sin cambiar de fase)
+  // Borrador de equipo
   socket.on("draftTeam", ({ room, team }) => {
     const r = rooms[room];
     if (!r || r.phase !== "teamSelection") return;
@@ -90,7 +91,7 @@ io.on("connection", (socket) => {
     io.to(room).emit("state", buildState(room));
   });
 
-  // Confirmar equipo y pasar a votación de misión
+  // Confirmar equipo → iniciar votación para aprobar o rechazar
   socket.on("selectTeam", ({ room, team }) => {
     const r = rooms[room];
     if (!r || r.phase !== "teamSelection") return;
@@ -114,25 +115,55 @@ io.on("connection", (socket) => {
     }
 
     r.team = cleanTeam;
-    r.phase = "missionVote";
-    r.missionVotes = [];
+    r.teamVotes = [];
+    r.phase = "teamVote";
+
+    // Notificar votación de equipo
+    io.to(room).emit("teamVoteStart", { team: r.team });
 
     io.to(room).emit("state", buildState(room));
   });
 
-  // Votación de misión
+  // Votación de equipo
+  socket.on("voteTeam", ({ room, vote }) => {
+    const r = rooms[room];
+    if (!r || r.phase !== "teamVote") return;
+
+    if (r.teamVotes.find((v) => v.playerId === socket.id)) return;
+
+    r.teamVotes.push({ playerId: socket.id, vote });
+
+    if (r.teamVotes.length === Object.keys(r.players).length) {
+      const approvals = r.teamVotes.filter((v) => v.vote === "Aprobar").length;
+      const rejections = r.teamVotes.length - approvals;
+
+      if (approvals > rejections) {
+        // Equipo aprobado → pasa a votación de misión
+        r.phase = "missionVote";
+        r.missionVotes = [];
+      } else {
+        // Equipo rechazado → pasa líder, misma ronda
+        r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
+        r.team = [];
+        r.teamVotes = [];
+        r.phase = "teamSelection";
+      }
+    }
+
+    io.to(room).emit("state", buildState(room));
+  });
+
+  // Votación misión
   socket.on("voteMission", ({ room, vote }) => {
     const r = rooms[room];
     if (!r || r.phase !== "missionVote") return;
     if (!r.team.includes(socket.id)) return;
 
-    // Evitar votos duplicados
     if (r.missionVotes.find((v) => v.playerId === socket.id)) return;
 
     r.missionVotes.push({ playerId: socket.id, vote });
     io.to(room).emit("state", buildState(room));
 
-    // Si todos votaron, calcular resultado automáticamente
     if (r.missionVotes.length === r.team.length) {
       const fail = r.missionVotes.some((v) => v.vote === "Fracaso");
       const winner = fail ? "Asesinos" : "Buenos";
@@ -141,20 +172,19 @@ io.on("connection", (socket) => {
       if (winner === "Buenos") r.goodWins++;
       else r.assassinWins++;
 
-      // Comprobar fin de partida
       if (r.goodWins >= 3 || r.assassinWins >= 3 || r.round >= 5) {
         r.phase = "gameOver";
         io.to(room).emit("state", buildState(room));
         return;
       }
 
-      // Siguiente ronda
+      // Pasar a siguiente ronda
       r.round++;
-      r.phase = "teamSelection";
       r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
       r.team = [];
-      r.votes = [];
+      r.teamVotes = [];
       r.missionVotes = [];
+      r.phase = "teamSelection";
 
       io.to(room).emit("state", buildState(room));
     }
@@ -177,7 +207,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// Construir estado actualizado para frontend
+// Construir estado actualizado
 function buildState(room) {
   const r = rooms[room];
   return {
@@ -188,7 +218,7 @@ function buildState(room) {
     goodWins: r.goodWins,
     assassinWins: r.assassinWins,
     team: r.team,
-    teamVotes: r.votes,
+    teamVotes: r.teamVotes,
     missionVotes: r.missionVotes,
     players: Object.values(r.players),
   };
