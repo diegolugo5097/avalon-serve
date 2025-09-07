@@ -10,7 +10,7 @@ const io = new Server({
 
 const rooms = {};
 
-// Tamaño de equipo por ronda y número de jugadores
+// Tabla oficial de jugadores requeridos por misión
 const missionTeamSizes = {
   5: [2, 3, 2, 3, 3],
   6: [2, 3, 4, 3, 4],
@@ -35,11 +35,24 @@ io.on("connection", (socket) => {
         goodWins: 0,
         assassinWins: 0,
         team: [],
-        teamVotes: [],
+        votes: [],
         missionVotes: [],
         roles: {},
+        maxPlayers: 5,
         gameOver: false,
       };
+    }
+
+    // Validar que la sala no esté llena
+    if (
+      rooms[room].maxPlayers &&
+      Object.keys(rooms[room].players).length >= rooms[room].maxPlayers
+    ) {
+      io.to(socket.id).emit("toast", {
+        type: "error",
+        msg: "La sala ya está llena",
+      });
+      return;
     }
 
     rooms[room].players[socket.id] = {
@@ -53,29 +66,23 @@ io.on("connection", (socket) => {
   });
 
   // Iniciar juego
-  socket.on("startGame", ({ room, assassinCount }) => {
+  socket.on("startGame", ({ room, assassinCount, maxPlayers }) => {
     const r = rooms[room];
     if (!r) return;
 
+    r.maxPlayers = maxPlayers || Object.keys(r.players).length;
+
+    // Asignar roles
     const playerIds = Object.keys(r.players);
     const shuffled = [...playerIds].sort(() => Math.random() - 0.5);
 
-    const assassins = shuffled.slice(0, assassinCount);
-    r.roles = {};
-    playerIds.forEach((id) => {
-      r.roles[id] = assassins.includes(id) ? "Asesino" : "Bueno";
-      io.to(id).emit("yourRole", r.roles[id]); // Enviamos el rol a cada jugador
+    const evilCount = assassinCount || Math.floor(playerIds.length / 3);
+    shuffled.forEach((id, i) => {
+      r.roles[id] = i < evilCount ? "Asesino" : "Bueno";
     });
 
     r.phase = "teamSelection";
-    r.round = 1;
-    r.team = [];
-    r.teamVotes = [];
-    r.missionVotes = [];
-    r.results = [];
-    r.goodWins = 0;
-    r.assassinWins = 0;
-
+    r.leaderIndex = 0;
     io.to(room).emit("state", buildState(room));
   });
 
@@ -91,7 +98,7 @@ io.on("connection", (socket) => {
     io.to(room).emit("state", buildState(room));
   });
 
-  // Confirmar equipo → iniciar votación para aprobar o rechazar
+  // Confirmar equipo
   socket.on("selectTeam", ({ room, team }) => {
     const r = rooms[room];
     if (!r || r.phase !== "teamSelection") return;
@@ -99,8 +106,10 @@ io.on("connection", (socket) => {
     const leaderId = Object.keys(r.players)[r.leaderIndex];
     if (socket.id !== leaderId) return;
 
-    const totalPlayers = Object.keys(r.players).length;
-    const required = missionTeamSizes[totalPlayers]?.[r.round - 1] || 2;
+    const required =
+      missionTeamSizes[r.maxPlayers || Object.keys(r.players).length]?.[
+        r.round - 1
+      ] || 2;
 
     const cleanTeam = Array.isArray(team)
       ? team.filter((id) => r.players[id])
@@ -115,12 +124,8 @@ io.on("connection", (socket) => {
     }
 
     r.team = cleanTeam;
-    r.teamVotes = [];
     r.phase = "teamVote";
-
-    // Notificar votación de equipo
-    io.to(room).emit("teamVoteStart", { team: r.team });
-
+    r.votes = [];
     io.to(room).emit("state", buildState(room));
   });
 
@@ -129,34 +134,32 @@ io.on("connection", (socket) => {
     const r = rooms[room];
     if (!r || r.phase !== "teamVote") return;
 
-    if (r.teamVotes.find((v) => v.playerId === socket.id)) return;
+    if (r.votes.find((v) => v.playerId === socket.id)) return;
 
-    r.teamVotes.push({ playerId: socket.id, vote });
+    r.votes.push({ playerId: socket.id, vote });
+    io.to(room).emit("state", buildState(room));
 
-    if (r.teamVotes.length === Object.keys(r.players).length) {
-      const approvals = r.teamVotes.filter((v) => v.vote === "Aprobar").length;
-      const rejections = r.teamVotes.length - approvals;
+    if (r.votes.length === Object.keys(r.players).length) {
+      const yesVotes = r.votes.filter((v) => v.vote === "Aprobar").length;
+      const majority = yesVotes > Object.keys(r.players).length / 2;
 
-      if (approvals > rejections) {
-        // Equipo aprobado → pasa a votación de misión
+      if (majority) {
         r.phase = "missionVote";
         r.missionVotes = [];
       } else {
-        // Equipo rechazado → pasa líder, misma ronda
-        r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
-        r.team = [];
-        r.teamVotes = [];
         r.phase = "teamSelection";
+        r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
       }
-    }
 
-    io.to(room).emit("state", buildState(room));
+      io.to(room).emit("state", buildState(room));
+    }
   });
 
-  // Votación misión
+  // Votación de misión
   socket.on("voteMission", ({ room, vote }) => {
     const r = rooms[room];
     if (!r || r.phase !== "missionVote") return;
+
     if (!r.team.includes(socket.id)) return;
 
     if (r.missionVotes.find((v) => v.playerId === socket.id)) return;
@@ -178,13 +181,12 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Pasar a siguiente ronda
       r.round++;
+      r.phase = "teamSelection";
       r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
       r.team = [];
-      r.teamVotes = [];
+      r.votes = [];
       r.missionVotes = [];
-      r.phase = "teamSelection";
 
       io.to(room).emit("state", buildState(room));
     }
@@ -196,7 +198,6 @@ io.on("connection", (socket) => {
       const r = rooms[room];
       if (r.players[socket.id]) {
         delete r.players[socket.id];
-
         if (Object.keys(r.players).length === 0) {
           delete rooms[room];
         } else {
@@ -218,9 +219,10 @@ function buildState(room) {
     goodWins: r.goodWins,
     assassinWins: r.assassinWins,
     team: r.team,
-    teamVotes: r.teamVotes,
+    teamVotes: r.votes,
     missionVotes: r.missionVotes,
     players: Object.values(r.players),
+    maxPlayers: r.maxPlayers,
   };
 }
 
