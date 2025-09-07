@@ -179,54 +179,43 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("voteMission", ({ room, playerId, vote }) => {
-    const roomData = rooms[room];
-    if (!roomData) return;
+  // Votación de misión (si hay al menos un Fracaso => gana Asesinos la ronda; si no, gana Buenos)
+  socket.on("voteMission", ({ room, vote }) => {
+    const r = rooms[room];
+    if (!r || r.phase !== "missionVote") return;
+    if (!r.team.includes(socket.id)) return; // solo miembros del equipo votan
+    if (r.missionVotes.find((v) => v.id === socket.id)) return;
 
-    // Solo jugadores del equipo pueden votar
-    if (
-      !roomData.missionVotes.find((v) => v.playerId === playerId) &&
-      roomData.team.includes(playerId)
-    ) {
-      roomData.missionVotes.push({ playerId, vote });
-      io.to(room).emit("updateMissionVotes", roomData.missionVotes);
+    // "Éxito" o "Fracaso" (cualquiera puede votar lo que quiera)
+    r.missionVotes.push({ id: socket.id, vote });
+    emitRoomState(room);
 
-      // Esperar hasta que TODOS los del equipo voten
-      if (roomData.missionVotes.length === roomData.team.length) {
-        // ✅ Nueva lógica: si algún voto es "Rechazada", misión perdida
-        const rejected = roomData.missionVotes.some(
-          (v) => v.vote === "Rechazada"
-        );
-        const success = !rejected;
+    if (r.missionVotes.length === r.team.length) {
+      const fails = r.missionVotes.filter((v) => v.vote === "Fracaso").length;
+      const winner = fails > 0 ? "Asesinos" : "Buenos";
+      if (winner === "Asesinos") r.assassinWins++;
+      else r.goodWins++;
 
-        roomData.results.push({ round: roomData.results.length + 1, success });
-        if (success) roomData.goodWins++;
-        else roomData.evilWins++;
+      r.results.push({
+        round: r.round,
+        winner,
+        reason: winner === "Asesinos" ? "fracaso en misión" : "éxito en misión",
+      });
 
-        if (roomData.goodWins >= 3 || roomData.evilWins >= 3)
-          roomData.gameOver = true;
+      // Avanzar
+      r.round++;
+      r.phase = "teamSelection";
+      r.team = [];
+      r.votes = [];
+      r.missionVotes = [];
+      nextLeader(r);
 
-        io.to(room).emit("missionResult", {
-          success,
-          results: roomData.results,
-          goodWins: roomData.goodWins,
-          evilWins: roomData.evilWins,
-          gameOver: roomData.gameOver,
-        });
+      // ¿Fin?
+      if (r.assassinWins >= 3 || r.goodWins >= 3 || r.round > r.maxRounds)
+        r.gameOver = true;
 
-        if (!roomData.gameOver) {
-          roomData.phase = "teamSelection";
-          roomData.leaderIndex =
-            (roomData.leaderIndex + 1) % Object.keys(roomData.players).length;
-          roomData.team = [];
-          roomData.votes = [];
-          roomData.missionVotes = [];
-          io.to(room).emit("nextRound", {
-            phase: "teamSelection",
-            leaderId: Object.keys(roomData.players)[roomData.leaderIndex],
-          });
-        }
-      }
+      io.to(room).emit("roundResolved", r.results[r.results.length - 1]);
+      emitRoomState(room);
     }
   });
 
