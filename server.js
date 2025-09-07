@@ -182,40 +182,43 @@ io.on("connection", (socket) => {
   // Votación de misión (si hay al menos un Fracaso => gana Asesinos la ronda; si no, gana Buenos)
   socket.on("voteMission", ({ room, vote }) => {
     const r = rooms[room];
-    if (!r || r.phase !== "missionVote") return;
-    if (!r.team.includes(socket.id)) return; // solo miembros del equipo votan
-    if (r.missionVotes.find((v) => v.id === socket.id)) return;
+    if (!r || !r.team.includes(socket.id)) return;
 
-    // "Éxito" o "Fracaso" (cualquiera puede votar lo que quiera)
-    r.missionVotes.push({ id: socket.id, vote });
-    emitRoomState(room);
+    // Evitar votos duplicados
+    if (r.missionVotes.find((v) => v.playerId === socket.id)) return;
 
+    r.missionVotes.push({ playerId: socket.id, vote });
+
+    // Avisar a todos del progreso de votos
+    io.to(room).emit("state", r);
+
+    // Cuando todos votaron, calcular resultado automático
     if (r.missionVotes.length === r.team.length) {
-      const fails = r.missionVotes.filter((v) => v.vote === "Fracaso").length;
-      const winner = fails > 0 ? "Asesinos" : "Buenos";
-      if (winner === "Asesinos") r.assassinWins++;
-      else r.goodWins++;
+      const fail = r.missionVotes.some((v) => v.vote === "Fracaso");
+      const winner = fail ? "Asesinos" : "Buenos";
 
-      r.results.push({
-        round: r.round,
-        winner,
-        reason: winner === "Asesinos" ? "fracaso en misión" : "éxito en misión",
-      });
+      // Guardar resultado
+      r.results.push({ round: r.round, winner });
 
-      // Avanzar
+      if (winner === "Buenos") r.goodWins++;
+      else r.assassinWins++;
+
+      // Verificar si alguien ganó
+      if (r.goodWins >= 3 || r.assassinWins >= 3) {
+        r.phase = "gameOver";
+        io.to(room).emit("state", r);
+        return;
+      }
+
+      // Reiniciar para siguiente ronda
       r.round++;
       r.phase = "teamSelection";
+      r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
       r.team = [];
-      r.votes = [];
+      r.teamVotes = [];
       r.missionVotes = [];
-      nextLeader(r);
 
-      // ¿Fin?
-      if (r.assassinWins >= 3 || r.goodWins >= 3 || r.round > r.maxRounds)
-        r.gameOver = true;
-
-      io.to(room).emit("roundResolved", r.results[r.results.length - 1]);
-      emitRoomState(room);
+      io.to(room).emit("state", r);
     }
   });
 
