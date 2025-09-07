@@ -52,6 +52,32 @@ io.on("connection", (socket) => {
     io.to(room).emit("state", buildState(room));
   });
 
+  // Iniciar juego
+  socket.on("startGame", ({ room, assassinCount }) => {
+    const r = rooms[room];
+    if (!r) return;
+
+    const playerIds = Object.keys(r.players);
+    const shuffled = [...playerIds].sort(() => Math.random() - 0.5);
+
+    const assassins = shuffled.slice(0, assassinCount);
+    r.roles = {};
+    playerIds.forEach((id) => {
+      r.roles[id] = assassins.includes(id) ? "Asesino" : "Bueno";
+    });
+
+    r.phase = "teamSelection";
+    r.round = 1;
+    r.team = [];
+    r.votes = [];
+    r.missionVotes = [];
+    r.results = [];
+    r.goodWins = 0;
+    r.assassinWins = 0;
+
+    io.to(room).emit("state", buildState(room));
+  });
+
   // Borrador de equipo (sin cambiar de fase)
   socket.on("draftTeam", ({ room, team }) => {
     const r = rooms[room];
@@ -61,7 +87,6 @@ io.on("connection", (socket) => {
     if (socket.id !== leaderId) return;
 
     r.team = Array.isArray(team) ? team.filter((id) => r.players[id]) : [];
-
     io.to(room).emit("state", buildState(room));
   });
 
@@ -107,7 +132,7 @@ io.on("connection", (socket) => {
     r.missionVotes.push({ playerId: socket.id, vote });
     io.to(room).emit("state", buildState(room));
 
-    // Si todos los seleccionados ya votaron, calcular resultado automáticamente
+    // Si todos votaron, calcular resultado automáticamente
     if (r.missionVotes.length === r.team.length) {
       const fail = r.missionVotes.some((v) => v.vote === "Fracaso");
       const winner = fail ? "Asesinos" : "Buenos";
@@ -123,7 +148,7 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Pasar a siguiente ronda
+      // Siguiente ronda
       r.round++;
       r.phase = "teamSelection";
       r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
@@ -133,23 +158,6 @@ io.on("connection", (socket) => {
 
       io.to(room).emit("state", buildState(room));
     }
-  });
-
-  socket.on("missionResult", ({ success }) => {
-    setLastMissionResult(success ? "success" : "fail");
-    setShowMissionResult(true);
-
-    // Reproducir sonido según resultado
-    const sound = new Audio(
-      success ? "/sounds/success.mp3" : "/sounds/fail.mp3"
-    );
-    sound.play().catch(() => {});
-
-    // Ocultar modal después de 2.5 segundos
-    setTimeout(() => {
-      setShowMissionResult(false);
-      setLastMissionResult(null);
-    }, 2500);
   });
 
   // Desconexión de jugador
@@ -169,7 +177,7 @@ io.on("connection", (socket) => {
   });
 });
 
-// Construir estado actualizado
+// Construir estado actualizado para frontend
 function buildState(room) {
   const r = rooms[room];
   return {
