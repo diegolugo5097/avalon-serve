@@ -245,6 +245,7 @@ function buildState(room) {
     missionVotes: r.missionVotes,
     players: Object.values(r.players),
     maxPlayers: r.maxPlayers,
+    roles: r.roles, // 👈 Agregar esto
   };
 }
 
