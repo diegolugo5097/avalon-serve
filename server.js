@@ -12,6 +12,7 @@ const rooms = {};
 
 // Tabla oficial de jugadores requeridos por misión
 const missionTeamSizes = {
+  4: [2, 2, 2, 3, 3], // 👈 Soporte agregado para 4 jugadores
   5: [2, 3, 2, 3, 3],
   6: [2, 3, 4, 3, 4],
   7: [2, 3, 3, 4, 4],
@@ -38,7 +39,7 @@ io.on("connection", (socket) => {
         votes: [],
         missionVotes: [],
         roles: {},
-        maxPlayers: 4,
+        maxPlayers: null, // se definirá en startGame
         gameOver: false,
       };
     }
@@ -110,10 +111,16 @@ io.on("connection", (socket) => {
     const leaderId = Object.keys(r.players)[r.leaderIndex];
     if (socket.id !== leaderId) return;
 
-    const required =
-      missionTeamSizes[r.maxPlayers || Object.keys(r.players).length]?.[
-        r.round - 1
-      ] || 2;
+    const totalPlayers = r.maxPlayers || Object.keys(r.players).length;
+    const required = missionTeamSizes[totalPlayers]?.[r.round - 1];
+
+    if (!required) {
+      io.to(socket.id).emit("toast", {
+        type: "error",
+        msg: "No se pudo determinar la cantidad de jugadores requerida para esta misión.",
+      });
+      return;
+    }
 
     const cleanTeam = Array.isArray(team)
       ? team.filter((id) => r.players[id])
