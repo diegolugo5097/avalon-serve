@@ -25,7 +25,7 @@ io.on("connection", (socket) => {
   console.log(`Jugador conectado: ${socket.id}`);
 
   // Unirse a sala
-  socket.on("joinRoom", ({ name, room, avatar }) => {
+  socket.on("joinRoom", ({ name, room, avatar, prevId }) => {
     if (!rooms[room]) {
       rooms[room] = {
         players: {},
@@ -44,7 +44,13 @@ io.on("connection", (socket) => {
       };
     }
 
-    // Registrar o actualizar jugador
+    // Si el jugador ya existía, recuperamos su rol
+    const existingRole = rooms[room].roles[prevId];
+    if (existingRole) {
+      rooms[room].roles[socket.id] = existingRole;
+      delete rooms[room].roles[prevId];
+    }
+
     rooms[room].players[socket.id] = {
       id: socket.id,
       name,
@@ -53,18 +59,9 @@ io.on("connection", (socket) => {
 
     socket.join(room);
 
-    // Si ya se asignaron roles, reenviamos su rol
-    const role = rooms[room].roles[socket.id];
-    if (role) {
-      io.to(socket.id).emit("yourRole", role);
-
-      // Si es asesino, reenvía la lista de asesinos
-      if (role === "Asesino") {
-        const assassinIds = Object.keys(rooms[room].roles).filter(
-          (id) => rooms[room].roles[id] === "Asesino"
-        );
-        io.to(socket.id).emit("assassinList", assassinIds);
-      }
+    // Si tenía rol, se lo enviamos inmediatamente
+    if (rooms[room].roles[socket.id]) {
+      io.to(socket.id).emit("yourRole", rooms[room].roles[socket.id]);
     }
 
     io.to(room).emit("state", buildState(room));
