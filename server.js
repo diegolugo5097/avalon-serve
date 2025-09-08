@@ -38,7 +38,7 @@ io.on("connection", (socket) => {
         votes: [],
         missionVotes: [],
         roles: {},
-        maxPlayers: 5,
+        maxPlayers: 4,
         gameOver: false,
       };
     }
