@@ -78,12 +78,19 @@ io.on("connection", (socket) => {
     const shuffled = [...playerIds].sort(() => Math.random() - 0.5);
 
     const evilCount = assassinCount || Math.floor(playerIds.length / 3);
+    const assassinIds = shuffled.slice(0, evilCount); // <- todos los asesinos
+
     shuffled.forEach((id, i) => {
       const role = i < evilCount ? "Asesino" : "Bueno";
       r.roles[id] = role;
 
-      // Enviar rol individual a cada jugador
+      // Enviar rol individual
       io.to(id).emit("yourRole", role);
+
+      // Si es asesino, enviarle en privado la lista de asesinos
+      if (role === "Asesino") {
+        io.to(id).emit("assassinList", assassinIds);
+      }
     });
 
     r.phase = "teamSelection";
