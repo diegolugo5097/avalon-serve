@@ -39,23 +39,12 @@ io.on("connection", (socket) => {
         votes: [],
         missionVotes: [],
         roles: {},
-        maxPlayers: null, // se definirá en startGame
+        maxPlayers: 4,
         gameOver: false,
       };
     }
 
-    // Validar que la sala no esté llena
-    if (
-      rooms[room].maxPlayers &&
-      Object.keys(rooms[room].players).length >= rooms[room].maxPlayers
-    ) {
-      io.to(socket.id).emit("toast", {
-        type: "error",
-        msg: "La sala ya está llena",
-      });
-      return;
-    }
-
+    // Registrar o actualizar jugador
     rooms[room].players[socket.id] = {
       id: socket.id,
       name,
@@ -63,6 +52,21 @@ io.on("connection", (socket) => {
     };
 
     socket.join(room);
+
+    // Si ya se asignaron roles, reenviamos su rol
+    const role = rooms[room].roles[socket.id];
+    if (role) {
+      io.to(socket.id).emit("yourRole", role);
+
+      // Si es asesino, reenvía la lista de asesinos
+      if (role === "Asesino") {
+        const assassinIds = Object.keys(rooms[room].roles).filter(
+          (id) => rooms[room].roles[id] === "Asesino"
+        );
+        io.to(socket.id).emit("assassinList", assassinIds);
+      }
+    }
+
     io.to(room).emit("state", buildState(room));
   });
 
