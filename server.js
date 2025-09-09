@@ -1,3 +1,4 @@
+// server.js
 const { Server } = require("socket.io");
 const PORT = process.env.PORT || 3001;
 
@@ -34,7 +35,7 @@ function ensureRoom(room) {
       roles: {}, // roles por socket.id
       maxPlayers: 4,
       gameOver: false,
-      cleanupTimeoutId: null, // ventana de gracia
+      cleanupTimeoutId: null, // ventana de gracia si sala queda vacía
     };
   } else if (rooms[room].cleanupTimeoutId) {
     clearTimeout(rooms[room].cleanupTimeoutId);
@@ -95,7 +96,7 @@ io.on("connection", (socket) => {
 
     socket.join(room);
 
-    // Si ya tenía rol, reenviar
+    // Si ya tenía rol, reenviar (solo su rol; no se envía lista de asesinos)
     if (r.roles[socket.id]) {
       io.to(socket.id).emit("yourRole", r.roles[socket.id]);
     }
@@ -120,8 +121,11 @@ io.on("connection", (socket) => {
     r.roles = {};
     shuffled.forEach((id, i) => {
       r.roles[id] = i < evilCount ? "Asesino" : "Bueno";
-      io.to(id).emit("yourRole", r.roles[id]);
+      io.to(id).emit("yourRole", r.roles[id]); // privado
     });
+
+    // 👇 Eliminado: NO enviar assassinList a asesinos
+    // (De esta manera, el front ya no puede resaltar aliados)
 
     r.phase = "teamSelection";
     r.leaderIndex = 0;
@@ -218,6 +222,7 @@ io.on("connection", (socket) => {
 
       if (r.goodWins >= 3 || r.assassinWins >= 3 || r.round >= 5) {
         r.phase = "gameOver";
+        r.gameOver = true;
         io.to(room).emit("state", buildState(room));
         return;
       }
@@ -232,7 +237,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Desconexión (con ventana de gracia)
+  // Desconexión (con ventana de gracia sólo si sala queda vacía)
   socket.on("disconnect", () => {
     for (const room in rooms) {
       const r = rooms[room];
@@ -247,7 +252,7 @@ io.on("connection", (socket) => {
           r.cleanupTimeoutId = setTimeout(() => {
             delete rooms[room];
             console.log("Sala eliminada por inactividad:", room);
-          }, 15000); // ⏳ 15s para reconectar tras refresh
+          }, 15000); // 15s para reconectar tras refresh si nadie queda
         } else {
           io.to(room).emit("state", buildState(room));
         }
@@ -258,7 +263,7 @@ io.on("connection", (socket) => {
 
 function buildState(room) {
   const r = rooms[room];
-  return {
+  const payload = {
     phase: r.phase,
     leaderId: Object.keys(r.players)[r.leaderIndex],
     round: r.round,
@@ -271,6 +276,11 @@ function buildState(room) {
     players: Object.values(r.players),
     maxPlayers: r.maxPlayers,
   };
+  // Revela roles sólo al finalizar la partida (útil para tu modal final)
+  if (r.phase === "gameOver") {
+    payload.roles = r.roles;
+  }
+  return payload;
 }
 
 io.listen(PORT);
