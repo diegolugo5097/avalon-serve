@@ -146,6 +146,17 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("state", buildState(roomCode));
   });
 
+  socket.on("story:next", ({ chapterId, nodeId }) => {
+    const room = getRoomBySocket(socket);
+    if (!room) return;
+
+    const node = getNode(chapterId, nodeId);
+    if (node?.next) {
+      room.nodeId = node.next;
+      emitStoryNode(room);
+    }
+  });
+
   /** Unirse / Reconexion */
   socket.on("joinRoom", ({ name, roomCode, avatar, prevId }) => {
     const code = (roomCode || "").toUpperCase();
