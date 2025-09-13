@@ -20,7 +20,7 @@ const missionTeamSizes = {
 };
 
 function generateRoomCode(len = 6) {
-  const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // sin confusos: I, L, O, 0, 1
+  const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // sin confusos
   let code = "";
   for (let i = 0; i < len; i++)
     code += chars[Math.floor(Math.random() * chars.length)];
@@ -34,18 +34,21 @@ function ensureRoom(roomCode) {
       leaderIndex: 0,
       phase: "lobby",
       round: 1,
-      results: [], // [{round, winner, successVotes, failVotes}]
+      results: [],
       goodWins: 0,
       assassinWins: 0,
-      team: [], // socketIds
-      votes: [], // [{playerId, vote}]
-      missionVotes: [], // [{playerId, vote}]
-      roles: {}, // { socketId: "Asesino" | "Bueno" }
-      maxPlayers: 5, // configurado al crear
-      assassinCount: 2, // configurado al crear
+      team: [],
+      votes: [],
+      missionVotes: [],
+      roles: {},
+      maxPlayers: 5,
+      assassinCount: 2,
       gameOver: false,
       cleanupTimeoutId: null,
-      creatorId: null, // socket.id del creador
+      creatorId: null,
+      // 🔹 Configuración modo líder
+      leaderMode: false,
+      leaderIdRole: null,
     };
   } else if (rooms[roomCode].cleanupTimeoutId) {
     clearTimeout(rooms[roomCode].cleanupTimeoutId);
@@ -56,27 +59,23 @@ function ensureRoom(roomCode) {
 function replaceIdEverywhere(r, oldId, newId) {
   if (oldId === newId) return;
 
-  // Mover rol
   if (r.roles[oldId]) {
     r.roles[newId] = r.roles[oldId];
     delete r.roles[oldId];
   }
 
-  // Equipo
   r.team = r.team.map((id) => (id === oldId ? newId : id));
 
-  // Votos de equipo
   r.votes = r.votes.map((v) =>
     v.playerId === oldId ? { ...v, playerId: newId } : v
   );
 
-  // Votos de misión
   r.missionVotes = r.missionVotes.map((v) =>
     v.playerId === oldId ? { ...v, playerId: newId } : v
   );
 
-  // Creador
   if (r.creatorId === oldId) r.creatorId = newId;
+  if (r.leaderIdRole === oldId) r.leaderIdRole = newId;
 }
 
 function buildState(roomCode) {
@@ -93,12 +92,12 @@ function buildState(roomCode) {
     missionVotes: r.missionVotes,
     players: Object.values(r.players),
     maxPlayers: r.maxPlayers,
-    // Revelamos roles sólo al final de la partida
+    leaderMode: r.leaderMode,
+    leaderIdRole: r.leaderMode ? r.leaderIdRole : null,
     roles: r.phase === "gameOver" ? r.roles : undefined,
   };
 }
 
-/** Helpers */
 function clampAssassins(totalPlayers, requested) {
   const maxAllowed = Math.max(1, totalPlayers - 1);
   const base =
@@ -110,75 +109,52 @@ function clampAssassins(totalPlayers, requested) {
 io.on("connection", (socket) => {
   console.log("Jugador conectado:", socket.id);
 
-  /** Crear sala: crea el room, mete al creador y emite roomCreated */
-  socket.on("createRoom", ({ name, avatar, maxPlayers, assassinCount }) => {
-    // Generar un código único
-    let roomCode;
-    do {
-      roomCode = generateRoomCode();
-    } while (rooms[roomCode]);
+  /** Crear sala */
+  socket.on(
+    "createRoom",
+    ({ name, avatar, maxPlayers, assassinCount, leaderMode }) => {
+      let roomCode;
+      do {
+        roomCode = generateRoomCode();
+      } while (rooms[roomCode]);
 
-    ensureRoom(roomCode);
-    const r = rooms[roomCode];
+      ensureRoom(roomCode);
+      const r = rooms[roomCode];
 
-    // Sanitizar configuraciones
-    const mp = Number(maxPlayers) || 5;
-    r.maxPlayers = Math.min(Math.max(mp, 4), 10);
-    r.assassinCount = clampAssassins(r.maxPlayers, Number(assassinCount));
+      const mp = Number(maxPlayers) || 5;
+      r.maxPlayers = Math.min(Math.max(mp, 4), 10);
+      r.assassinCount = clampAssassins(r.maxPlayers, Number(assassinCount));
+      r.leaderMode = !!leaderMode; // 🔹 activar o no el modo líder
 
-    // Registrar creador y unir al room
-    r.creatorId = socket.id;
-    r.players[socket.id] = {
-      id: socket.id,
-      name: name || "?",
-      avatar: avatar || null,
-    };
-    socket.join(roomCode);
+      r.creatorId = socket.id;
+      r.players[socket.id] = {
+        id: socket.id,
+        name: name || "?",
+        avatar: avatar || null,
+      };
+      socket.join(roomCode);
 
-    // Responder sólo al creador
-    io.to(socket.id).emit("roomCreated", {
-      roomCode,
-      maxPlayers: r.maxPlayers,
-      assassinCount: r.assassinCount,
-    });
+      io.to(socket.id).emit("roomCreated", {
+        roomCode,
+        maxPlayers: r.maxPlayers,
+        assassinCount: r.assassinCount,
+        leaderMode: r.leaderMode,
+      });
 
-    // Compartir estado del lobby a la sala
-    io.to(roomCode).emit("state", buildState(roomCode));
-  });
-
-  socket.on("story:next", ({ chapterId, nodeId }) => {
-    const room = getRoomBySocket(socket);
-    if (!room) return;
-
-    const node = getNode(chapterId, nodeId);
-    if (node?.next) {
-      room.nodeId = node.next;
-      emitStoryNode(room);
+      io.to(roomCode).emit("state", buildState(roomCode));
     }
-  });
+  );
 
-  /** Unirse / Reconexion */
+  /** Unirse */
   socket.on("joinRoom", ({ name, roomCode, avatar, prevId }) => {
     const code = (roomCode || "").toUpperCase();
-    if (!code) {
-      io.to(socket.id).emit("toast", {
-        type: "error",
-        msg: "Código de sala inválido.",
-      });
+    if (!code || !rooms[code]) {
+      io.to(socket.id).emit("toast", { type: "error", msg: "Sala inválida." });
       return;
     }
-    if (!rooms[code]) {
-      io.to(socket.id).emit("toast", {
-        type: "error",
-        msg: "La sala no existe o expiró.",
-      });
-      return;
-    }
-
     ensureRoom(code);
     const r = rooms[code];
 
-    // Sala llena
     if (Object.keys(r.players).length >= r.maxPlayers && !r.players[prevId]) {
       io.to(socket.id).emit("toast", {
         type: "error",
@@ -187,7 +163,6 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Reasignación por reconexión
     if (prevId && r.players[prevId]) {
       replaceIdEverywhere(r, prevId, socket.id);
       const old = r.players[prevId];
@@ -199,7 +174,6 @@ io.on("connection", (socket) => {
         avatar: avatar || old.avatar || null,
       };
     } else {
-      // Alta normal
       r.players[socket.id] = {
         id: socket.id,
         name: name || "?",
@@ -209,15 +183,13 @@ io.on("connection", (socket) => {
 
     socket.join(code);
 
-    // Si ya tenía rol (reconexión en medio de la partida), reenviarlo
-    if (r.roles[socket.id]) {
+    if (r.roles[socket.id])
       io.to(socket.id).emit("yourRole", r.roles[socket.id]);
-    }
 
     io.to(code).emit("state", buildState(code));
   });
 
-  /** Iniciar partida: sólo el creador */
+  /** Iniciar partida */
   socket.on("startGame", ({ roomCode, assassinCount, maxPlayers }) => {
     const code = (roomCode || "").toUpperCase();
     const r = rooms[code];
@@ -226,28 +198,25 @@ io.on("connection", (socket) => {
     if (socket.id !== r.creatorId) {
       io.to(socket.id).emit("toast", {
         type: "error",
-        msg: "Solo quien creó la sala puede iniciar la partida.",
+        msg: "Solo el creador puede iniciar.",
       });
       return;
     }
 
-    // Validar que haya exactamente maxPlayers jugadores presentes
     const currentPlayers = Object.keys(r.players).length;
     if (currentPlayers !== r.maxPlayers) {
       io.to(socket.id).emit("toast", {
         type: "error",
-        msg: `Se requieren exactamente ${r.maxPlayers} jugadores para iniciar (hay ${currentPlayers}).`,
+        msg: `Se requieren ${r.maxPlayers} jugadores (hay ${currentPlayers}).`,
       });
       return;
     }
 
-    // Permitir ajustar configuración si se envía (del creador)
     if (typeof maxPlayers === "number") {
       r.maxPlayers = Math.min(Math.max(Math.floor(maxPlayers), 4), 10);
     }
     r.assassinCount = clampAssassins(r.maxPlayers, Number(assassinCount));
 
-    // Asignar roles
     const ids = Object.keys(r.players);
     const shuffled = [...ids].sort(() => Math.random() - 0.5);
     const evilCount = Math.min(r.assassinCount, ids.length - 1);
@@ -258,7 +227,23 @@ io.on("connection", (socket) => {
       io.to(id).emit("yourRole", r.roles[id]);
     });
 
-    // Reset de estado de juego
+    // 🔹 Asignar líder si el modo está activo
+    if (r.leaderMode) {
+      const goodPlayers = shuffled.slice(evilCount);
+      const leaderId =
+        goodPlayers[Math.floor(Math.random() * goodPlayers.length)];
+      r.roles[leaderId] = "Líder";
+      r.leaderIdRole = leaderId;
+      io.to(leaderId).emit("yourRole", "Líder");
+
+      // Revelar asesinos al líder
+      const assassins = shuffled
+        .slice(0, evilCount)
+        .map((id) => r.players[id].name);
+      io.to(leaderId).emit("assassinsRevealed", assassins);
+    }
+
+    // Resetear estado
     r.phase = "teamSelection";
     r.leaderIndex = 0;
     r.round = 1;
@@ -273,96 +258,19 @@ io.on("connection", (socket) => {
     io.to(code).emit("state", buildState(code));
   });
 
-  /** Borrador de equipo por el líder */
-  socket.on("draftTeam", ({ roomCode, team }) => {
-    const code = (roomCode || "").toUpperCase();
-    const r = rooms[code];
-    if (!r || r.phase !== "teamSelection") return;
-
-    const leaderId = Object.keys(r.players)[r.leaderIndex];
-    if (socket.id !== leaderId) return;
-
-    r.team = Array.isArray(team) ? team.filter((id) => r.players[id]) : [];
-    io.to(code).emit("state", buildState(code));
-  });
-
-  /** Confirmar equipo -> pasa a votación de equipo */
-  socket.on("selectTeam", ({ roomCode, team }) => {
-    const code = (roomCode || "").toUpperCase();
-    const r = rooms[code];
-    if (!r || r.phase !== "teamSelection") return;
-
-    const leaderId = Object.keys(r.players)[r.leaderIndex];
-    if (socket.id !== leaderId) return;
-
-    const total = r.maxPlayers; // usamos el total configurado para la sala
-    const required = missionTeamSizes[total]?.[r.round - 1] ?? 2;
-
-    const clean = Array.isArray(team) ? team.filter((id) => r.players[id]) : [];
-    if (clean.length !== required) {
-      io.to(socket.id).emit("toast", {
-        type: "error",
-        msg: `Debes elegir exactamente ${required} jugadores.`,
-      });
-      return;
-    }
-
-    r.team = clean;
-    r.phase = "teamVote";
-    r.votes = [];
-    io.to(code).emit("teamVoteStart");
-    io.to(code).emit("state", buildState(code));
-  });
-
-  /** Voto de equipo */
-  socket.on("voteTeam", ({ roomCode, vote }) => {
-    const code = (roomCode || "").toUpperCase();
-    const r = rooms[code];
-    if (!r || r.phase !== "teamVote") return;
-
-    // Evitar voto duplicado
-    if (r.votes.find((v) => v.playerId === socket.id)) return;
-
-    r.votes.push({
-      playerId: socket.id,
-      vote: vote === "Aprobar" ? "Aprobar" : "Rechazar",
-    });
-    io.to(code).emit("state", buildState(code));
-
-    // Cuando votan todos los presentes
-    if (r.votes.length === Object.keys(r.players).length) {
-      const yes = r.votes.filter((v) => v.vote === "Aprobar").length;
-      const majority = yes > Object.keys(r.players).length / 2;
-
-      if (majority) {
-        r.phase = "missionVote";
-        r.missionVotes = [];
-      } else {
-        r.phase = "teamSelection";
-        r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
-        r.team = [];
-      }
-      io.to(code).emit("state", buildState(code));
-    }
-  });
-
-  /** Voto de misión */
+  /** Voto misión */
   socket.on("voteMission", ({ roomCode, vote }) => {
     const code = (roomCode || "").toUpperCase();
     const r = rooms[code];
     if (!r || r.phase !== "missionVote") return;
 
-    // Sólo miembros del equipo pueden votar
     if (!r.team.includes(socket.id)) return;
-
-    // Evitar voto duplicado
     if (r.missionVotes.find((v) => v.playerId === socket.id)) return;
 
     const norm = vote === "Fracaso" ? "Fracaso" : "Éxito";
     r.missionVotes.push({ playerId: socket.id, vote: norm });
     io.to(code).emit("state", buildState(code));
 
-    // Cuando vota todo el equipo
     if (r.missionVotes.length === r.team.length) {
       const successVotes = r.missionVotes.filter(
         (v) => v.vote === "Éxito"
@@ -373,10 +281,7 @@ io.on("connection", (socket) => {
       const fail = failVotes > 0;
       const winner = fail ? "Asesinos" : "Buenos";
 
-      // Guardar resultado con conteos
       r.results.push({ round: r.round, winner, successVotes, failVotes });
-
-      // Notificar resultado de misión con conteos (para el modal del front)
       io.to(code).emit("missionResult", {
         round: r.round,
         winner,
@@ -384,18 +289,22 @@ io.on("connection", (socket) => {
         failVotes,
       });
 
-      // Actualizar marcador global
       if (winner === "Buenos") r.goodWins++;
       else r.assassinWins++;
 
-      // ¿Fin de partida?
+      // 🔹 Fin de partida con fase de asesinato del líder
       if (r.goodWins >= 3 || r.assassinWins >= 3 || r.round >= 5) {
-        r.phase = "gameOver";
-        io.to(code).emit("state", buildState(code));
-        return;
+        if (r.leaderMode && r.goodWins >= 3) {
+          r.phase = "assassination";
+          io.to(code).emit("state", buildState(code));
+          return;
+        } else {
+          r.phase = "gameOver";
+          io.to(code).emit("state", buildState(code));
+          return;
+        }
       }
 
-      // Siguiente ronda
       r.round++;
       r.phase = "teamSelection";
       r.leaderIndex = (r.leaderIndex + 1) % Object.keys(r.players).length;
@@ -406,30 +315,42 @@ io.on("connection", (socket) => {
     }
   });
 
-  /** Desconexión (con ventana de gracia si la sala queda vacía) */
+  /** Asesinato del líder */
+  socket.on("assassinateLeader", ({ roomCode, targetId }) => {
+    const code = (roomCode || "").toUpperCase();
+    const r = rooms[code];
+    if (!r || r.phase !== "assassination") return;
+
+    if (targetId === r.leaderIdRole) {
+      r.assassinWins++;
+    } else {
+      r.goodWins++;
+    }
+    r.phase = "gameOver";
+    io.to(code).emit("state", buildState(code));
+  });
+
+  /** Desconexión */
   socket.on("disconnect", () => {
     for (const code in rooms) {
       const r = rooms[code];
       if (!r.players[socket.id]) continue;
 
-      // Eliminar de jugadores y limpiar referencias
       delete r.players[socket.id];
       r.team = r.team.filter((id) => id !== socket.id);
       r.votes = r.votes.filter((v) => v.playerId !== socket.id);
       r.missionVotes = r.missionVotes.filter((v) => v.playerId !== socket.id);
 
-      // Ajustar leaderIndex si quedó fuera de rango
       const size = Object.keys(r.players).length;
       if (size > 0 && r.leaderIndex >= size) {
         r.leaderIndex = r.leaderIndex % size;
       }
 
       if (size === 0) {
-        // Programar limpieza de sala si nadie reconecta pronto
         if (r.cleanupTimeoutId) clearTimeout(r.cleanupTimeoutId);
         r.cleanupTimeoutId = setTimeout(() => {
           delete rooms[code];
-          console.log("Sala eliminada por inactividad:", code);
+          console.log("Sala eliminada:", code);
         }, 15000);
       } else {
         io.to(code).emit("state", buildState(code));
